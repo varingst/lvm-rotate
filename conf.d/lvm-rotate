@@ -1,0 +1,6 @@
+LVM_ROTATE="
+  ssdraid/home-active
+  ssdraid/test-snap:0
+"
+
+ROTATE_INTERVAL=7

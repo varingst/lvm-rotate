@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+print_help() { cat <<EOS
+  ${0##*/}: Back up origin of a lvm snapshot
+
+  Usage:
+  ${0##*/} [VOLUMEGROUP/SNAPSHOT]+ BACKUP_DIRECTORY
+
+  Options:
+      -p, --progress     Show progress bar (requires pv/pipe viewer)
+      -v, --verbose      More output
+      -h, --help         Print this screen
+
+      -z, --gzip         Compress with gzip
+      -j, --bzip2        Compress with bzip
+      -J, --xz           Compress with xz
+EOS
+}
+
+main() {
+  unset opt
+  declare -Ag opt
+  while (( $# )); do
+    case "$1" in
+      -j|--bzip2) opt[compress]=bzip;;
+      -J|--xz)    opt[compress]=xz;;
+      -z|--gzip)  opt[compress]=gzip;;
+      -p|--progress)
+        command -v pv >/dev/null 2>&1 || bail "--progress option requires pv (pipe viewer)"
+        opt[progress]=1
+      ;;
+      -v|--verbose) opt[verbose]=1;;
+      --help)
+        print_help
+        exit
+      ;;
+      --) shift; break;;
+      -*) bail "Invalid option '$1'";;
+      *) break;;
+    esac
+    shift
+  done
+
+  [[ -n "$1" ]] || bail "One or more lvm snapshots and a backup directory must be provided"
+  dest="${!#}"
+  [[ -d "$dest" ]] || bail "'$dest' is not a directory"
+
+  read_snapshots "$@"
+
+  initialize
+
+  has_space "$dest" || exit 1
+
+  for lv in "${origins[@]}"; do
+    # if we haven't been able to determine size of origin, ignore it
+    [[ -n "${sizes[$lv]}" ]] || continue
+
+    vg="${lv%*/}"
+    mkdir -p "$dest/$vg" || bail "Could not create dir for volume group '$vg'"
+    file=$(make_filename "$lv" "$dest")
+
+    if [[ -f "$file" ]]; then
+      verbose "Origin $lv has already been backed up, ignoring .."
+      continue
+    fi
+
+    backup "$vg" "$file"
+  done
+}
+
+read_snapshots() {
+  declare -Ag snaps
+  while (( $# > 1 )); do
+    snaps[$1]=pending
+    shift
+  done
+}
+
+initialize() {
+  declare -Ag ctimes
+  declare -Ag sizes
+  declare -ag origins
+
+  # gather logical volumes listed in snaps
+  while read line; do
+    IFS='|' read lv vg origin ctime <<< "$line"
+    name="$vg/$lv"
+    [[ -n "${snaps[$name]}" ]] || continue
+
+    [[ -n $origin ]] || bail "'$name' is not a snapshot, could not determine origin"
+    [[ -n "$ctime" ]] || error "Ignoring snapshot '$name', could not determine creation time"
+
+    snaps[$name]="$vg/$origin"
+    ctimes[$vg/$origin]=$(date --date="$ctime" +%s)
+  done < <(list_snaps)
+
+  # make sure all snaps are accounted or
+  for snap in "${!snaps[@]}"; do
+    if [[ "${snaps[$snap]}" == pending ]]; then
+      error "Snapshot '$snap' not found, ignoring .."
+      continue
+    fi
+    origins+=( "${snaps[$snap]}" )
+  done
+
+  # gather info about origins
+  while read line; do
+    IFS='|' read lv vg flags size <<< "$line"
+
+    name="$vg/$lv"
+
+    if active "$flags"; then
+      error "Origin '$name' was active and may be mounted, ignoring .."
+      continue
+    fi
+
+    if [[ -z "$size" ]]; then
+      error "Could not determine size for '$name', ignoring .."
+      continue
+    fi
+
+    sizes[$name]=$size
+  done < <(list_origins "${origins[@]}")
+}
+
+has_space() {
+  size=0
+  for lv in "${origins[@]}"; do
+    (( size += ${sizes[$lv]/B/} ))
+  done
+
+  read filesys free < <(check_free "$1")
+
+  size=$(to_kb "$size")
+  if (( free <= size )); then
+    error "Not enough space on '$filesys' for backup"
+    return 1
+  fi
+}
+
+check_free() {
+  df --portability \
+     --block-size=K \
+     "$1" \
+     | awk 'NR==2 { print $1, int($4) }'
+}
+
+to_kb() {
+  # add an extra 10% for good measure
+  awk -v bytes="$1" 'BEGIN { print int(bytes * 1.1 / 1024) }'
+}
+
+active() {
+  [[ "$1" =~ ^.....o ]]
+}
+
+make_filename() {
+  ext=
+  case "${opt[compress]}" in
+    bzip) ext=".bz2";;
+    gzip) ext=".gz";;
+    xz)   ext=".xz";;
+  esac
+
+  echo "$2/$1_$(creation_day "$1").img$ext"
+}
+
+creation_day() {
+  date --date="@${ctimes[$1]}" +%Y-%m-%d
+}
+
+backup() {
+  infile="/dev/$1"
+  outfile="$2"
+  if [[ -n "${opt[progress]}" ]]; then
+    echo "Backing up $infile to $outfile"
+    progress=( pv --size "${sizes[$1]/B/}" )
+  else
+    progress=( cat )
+  fi
+
+  if [[ -n "${opt[compress]}" ]]; then
+    compress=( ${opt[compress]} --stdout - )
+  else
+    compress=( cat )
+  fi
+
+  dd if="$infile" bs=8M 2>/dev/null | ${progress[@]} | "${compress[@]}" > $outfile
+}
+
+bail() {
+  error "$@"
+  exit 1
+}
+
+error() {
+  printf "Error: %s\n" "$@" >&2
+}
+
+verbose() {
+  [[ -n "${opt[verbose]}" ]] && printf "%s\n"
+}
+
+list_snaps() {
+  lvdisplay --noheadings \
+            --columns \
+            --separator '|' \
+            --options lv_name,vg_name,origin,lv_time
+}
+
+list_origins() {
+  lvdisplay --noheadings \
+            --columns \
+            --separator '|' \
+            --units B \
+            --options lv_name,vg_name,lv_attr,lv_size \
+            "$@" 2>/dev/null
+}
+
+main "$@"

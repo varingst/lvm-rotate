@@ -1,0 +1,129 @@
+#!/sbin/openrc-run
+# Copyright 1999-2017 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+depend() {
+  need lvm
+  before localmount
+}
+
+start() {
+  initialize
+
+  for snap in "${!lvs[@]}"; do
+    origin="${lvs[$snap]}"
+    [[ "$origin" == pending ]] && continue
+
+    if time_for_update "$snap"; then
+      if active "$snap"; then
+        eerror "$snap was active and may be mounted, cannot merge."
+        continue
+      fi
+
+      merge "$snap"
+    fi
+  done
+}
+
+stop() {
+  :
+}
+
+merge() {
+  einfo "Rotating snapshot $1 of origin ${lvs[$1]}"
+
+  lvconvert --merge /dev/$1
+  ecode=$?
+  if (( $ecode != 0 )); then
+    eerror "Merging $1 into origin ${lvs[$1]} failed"
+    return $ecode
+  fi
+
+  lvcreate --size "${snap_size[$1]}" \
+           --snapshot --name "${1#*/}" \
+           "${lvs[$1]}"
+  ecode=$?
+  if (( $ecode != 0 )); then
+    eerror "Creating snapshot $1 of origin ${lvs[$1]} failed"
+    return $ecode
+  fi
+}
+
+initialize() {
+  read_lvs
+  NOW=$(date +%s)
+  [[ -n "$ROTATE_INTERVAL" ]] || ROTATE_INTERVAL=7
+}
+
+read_lvs() {
+  declare -Ag lvs
+  declare -Ag snap_size
+  declare -Ag lv_flags
+  declare -Ag ctimes
+  declare -Ag intervals
+
+  # read snapshots from config
+  while read snapshot; do
+    [[ -n "$snapshot" ]] || continue
+    interval="${snapshot##*:}"
+    name="${snapshot%:*}"
+    lvs["$name"]=pending
+
+    # if no interval is given with the snapshot,
+    # use the default
+    if [[ "$interval" == "$name" ]]; then
+      intervals[$name]=$ROTATE_INTERVAL
+    else
+      intervals[$name]=$interval
+    fi
+  done <<< "$LVM_ROTATE"
+
+  # read lv info
+  dump=$(lvlist)
+  while read line; do
+    IFS="|" read lv vg flags size _ origin _ _ _ _ _ _ ctime <<< "$line"
+    name="$vg/$lv"
+    [[ -n "${lvs[$name]}" ]] || continue
+    if [[ -z "$origin" ]]; then
+      eerror "$name is not a snapshot, could not determine origin"
+      continue
+    fi
+
+    lvs[$name]="$vg/$origin"
+    snap_size[$name]=$size
+    lv_flags[$name]=$flags
+
+    if [[ -z "$ctime" ]]; then
+      ewarn "Creation time for snapshot $name not found"
+      ctime=@0
+    fi
+    ctimes[$name]=$(date --date="$ctime" +%s)
+  done <<< "$dump"
+
+  # check that all snapshots in config are accounted for
+  for lv in "${!lvs[@]}"; do
+    [[ "${lvs[$lv]}" == pending ]] && \
+      check_config "Snapshot '$lv' not found"
+  done
+}
+
+lvlist() {
+  lvdisplay --noheadings \
+            --columns \
+            --separator '|' \
+            --units B \
+            --options +lv_time
+}
+
+time_for_update() {
+  (( ${ctimes[$1]} + ( ${intervals[$1]} * 3600 * 24 ) < $NOW ))
+}
+
+active() {
+  [[ ${lv_flags[$1]} =~ ^.....o ]]
+}
+
+check_config() {
+  eerror "$1. Check config in /etc/conf.d/lvm-rotate"
+}
+
