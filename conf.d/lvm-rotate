@@ -1,6 +1,19 @@
-LVM_ROTATE="
-  ssdraid/home-active
-  ssdraid/test-snap:0
-"
+# /etc/conf.d/lvm-rotate
+#
+# LVM_ROTATE declares the snapshots to be rotated:
+#
+# LVM_ROTATE="
+#   volumegroup/logical-volume1
+#   volumegroup/logical-volume2:3
+# "
+#
+# logical-volume1 will use the ROTATE_INTERVAL,
+# while logical-volume2 will be rotated every 3 days
+
+LVM_ROTATE=""
+
+# ROTATE_INTERVAL is the default rotation interval, in days.
+# The default is 7, meaning that the volumes will be rotated
+# if the snapshot is older than 7 days during boot.
 
 ROTATE_INTERVAL=7
