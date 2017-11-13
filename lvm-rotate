@@ -22,7 +22,7 @@ main() {
   declare -Ag opt
   while (( $# )); do
     case "$1" in
-      -j|--bzip2) opt[compress]=bzip;;
+      -j|--bzip2) opt[compress]=bzip2;;
       -J|--xz)    opt[compress]=xz;;
       -z|--gzip)  opt[compress]=gzip;;
       -p|--progress)
@@ -59,7 +59,7 @@ main() {
     mkdir -p "$dest/$vg" || bail "Could not create dir for volume group '$vg'"
     file=$(make_filename "$lv" "$dest")
 
-    if [[ -f "$file" ]]; then
+    if [[ -s "$file" ]]; then
       verbose "Origin $lv has already been backed up, ignoring .."
       continue
     fi
@@ -157,7 +157,7 @@ active() {
 make_filename() {
   ext=
   case "${opt[compress]}" in
-    bzip) ext=".bz2";;
+    bzip2) ext=".bz2";;
     gzip) ext=".gz";;
     xz)   ext=".xz";;
   esac
@@ -176,6 +176,7 @@ backup() {
     echo "Backing up $infile to $outfile"
     progress=( pv --size "${sizes[$1]/B/}" )
   else
+    [[ -n "${opt[verbose]}" ]] && echo "Backing up $infile to $outfile"
     progress=( cat )
   fi
 
